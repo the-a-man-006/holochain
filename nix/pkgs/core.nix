@@ -27,21 +27,22 @@ rec {
 
   hcReleaseAutomationTest = let
     releaseAutomationCmd = logLevel: ''
-      # todo: need a way to not make the hdk fail despite it being unreleasable
       cargo run --manifest-path=crates/release-automation/Cargo.toml -- \
           --workspace-path=$PWD \
-          --log-level=${logLevel}\
+          --log-level=${logLevel} \
         check \
           --selection-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$" \
           --disallowed-version-reqs=">=0.1" \
           --allowed-selection-blockers=UnreleasableViaChangelogFrontmatter \
-          --allowed-dependency-blockers=UnreleasableViaChangelogFrontmatter \
-          --exclude-optional-deps \
-          --exclude-dep-kinds=development
+          --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter \
+          --exclude-optional-deps
+
     '';
     in writeShellScriptBin "hc-release-automation-test" ''
     set -euxo pipefail
 
+    # make sure the binary is built
+    cargo build --manifest-path=crates/release-automation/Cargo.toml
     # run the release-automation tests
     cargo test --manifest-path=crates/release-automation/Cargo.toml ''${@}
 
@@ -51,6 +52,20 @@ rec {
     ) || (
       ${releaseAutomationCmd "trace"}
     )
+  '';
+
+  hcReleaseAutmoationRelease = writeShellScriptBin "hc-release-automation-release" ''
+    set -euxo pipefail
+
+    cargo run --manifest-path=crates/release-automation/Cargo.toml -- \
+        --workspace-path=$PWD \
+        --log-level=trace \
+      release \
+        ''${@} \
+        --selection-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$" \
+        --disallowed-version-reqs=">=0.1" \
+        --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter \
+        --exclude-optional-deps
   '';
 
   hcStaticChecks = let
