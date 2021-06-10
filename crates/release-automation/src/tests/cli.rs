@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::changelog::sanitize;
 use crate::changelog::{ChangelogT, CrateChangelog, WorkspaceChangelog};
 use crate::crate_selection::ReleaseWorkspace;
@@ -6,6 +8,7 @@ use crate::tests::workspace_mocker::{
 };
 use anyhow::Context;
 use predicates::prelude::*;
+use std::io::Write;
 
 #[test]
 fn release_createreleasebranch() {
@@ -111,7 +114,7 @@ fn bump_versions_on_selection() {
         "--log-level=trace",
         "release",
         "--disallowed-version-reqs=>=0.1",
-        "--allowed-selection-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
+        "--allowed-matched-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
         "--steps=CreateReleaseBranch,BumpReleaseVersions",
     ]);
 
@@ -263,9 +266,6 @@ fn bump_versions_on_selection() {
         );
     }
 
-    // todo: ensure the git commits for the crate releases were created?
-    // todo: ensure the git tags for the crate releases were created?
-
     // ensure the git commit for the whole release was created
     let commit_msg = {
         let commit = workspace
@@ -294,14 +294,8 @@ fn bump_versions_on_selection() {
         commit_msg
     );
 
-    for expected_tag in &[
-        &format!("release-{}", topmost_workspace_release),
-        "crate_b-0.0.1",
-        "crate_a-0.0.2",
-        "crate_e-0.0.1",
-    ] {
-        crate::crate_selection::git_lookup_tag(workspace.git_repo(), &expected_tag)
-            .expect(&format!("git tag '{}' not found", &expected_tag));
+    // ensure the git tags for the crate releases were created
+    for expected_tag in &["crate_b-0.0.1", "crate_a-0.0.2", "crate_e-0.0.1"] {
         crate::crate_selection::git_lookup_tag(workspace.git_repo(), &expected_tag)
             .expect(&format!("git tag '{}' not found", &expected_tag));
     }
@@ -355,7 +349,7 @@ fn release_publish() {
         "--log-level=trace",
         "release",
         "--disallowed-version-reqs=>=0.1",
-        "--allowed-selection-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
+        "--allowed-matched-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
         "--steps=CreateReleaseBranch,BumpReleaseVersions",
     ]);
     let output = assert_cmd_success!(cmd);
@@ -387,7 +381,7 @@ fn post_release_version_bumps() {
         "--log-level=trace",
         "release",
         "--disallowed-version-reqs=>=0.1",
-        "--allowed-selection-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
+        "--allowed-matched-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
         "--steps=CreateReleaseBranch,BumpReleaseVersions",
     ]);
     let output = assert_cmd_success!(cmd);
@@ -440,4 +434,207 @@ fn post_release_version_bumps() {
         commit_msg,
         topmost_release_title,
     );
+
+    {
+        // ensure the workspace release tag has been created
+        let topmost_workspace_release = workspace
+            .changelog()
+            .unwrap()
+            .topmost_release()
+            .unwrap()
+            .map(|change| change.title().to_string())
+            .unwrap();
+        let expected_tag = format!("release-{}", topmost_workspace_release);
+        crate::crate_selection::git_lookup_tag(workspace.git_repo(), &expected_tag)
+            .expect(&format!("git tag '{}' not found", &expected_tag));
+    }
+}
+
+#[test]
+fn multiple_subsequent_releases() {
+    let workspace_mocker = example_workspace_1().unwrap();
+    type A = (PathBuf, Vec<String>, Vec<String>);
+    type F = Box<dyn Fn(A)>;
+
+    for (i, (expected_versions, expected_crates, expect_new_release, pre_release_fn)) in [
+        (
+            // bump the first time as they're initially released
+            vec!["0.0.2-dev.0", "0.0.3-dev.0", "0.0.2-dev.0"],
+            vec!["crate_b", "crate_a", "crate_e"],
+            true,
+            Box::new(|_| {}) as F,
+        ),
+        (
+            // should not bump the second time without making any changes
+            vec!["0.0.2-dev.0", "0.0.3-dev.0", "0.0.2-dev.0"],
+            vec!["crate_b", "crate_a", "crate_e"],
+            false,
+            Box::new(|_| {}) as F,
+        ),
+        (
+            // only crate_a and crate_e have changed, expect these to be bumped
+            vec!["0.0.2-dev.0", "0.0.4-dev.0", "0.0.3-dev.0"],
+            vec!["crate_b", "crate_a", "crate_e"],
+            true,
+            Box::new(|args: A| {
+                let root = args.0.clone();
+
+                for crt in &["crate_a", "crate_e"] {
+                    let mut readme = std::fs::OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open(root.join(format!("crates/{}/README.md", crt)))
+                        .unwrap();
+
+                    writeln!(readme, "A new line!").unwrap();
+                }
+
+                ReleaseWorkspace::try_new(root.clone())
+                    .unwrap()
+                    .git_add_all_and_commit("some chnages", None)
+                    .unwrap();
+            }) as F,
+        ),
+        (
+            // change only crate_b
+            vec!["0.0.3-dev.0", "0.0.4-dev.0", "0.0.3-dev.0"],
+            vec!["crate_b", "crate_a", "crate_e"],
+            true,
+            Box::new(|args: A| {
+                let root = args.0.clone();
+
+                for crt in &["crate_b"] {
+                    let mut readme = std::fs::OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open(root.join(format!("crates/{}/README.md", crt)))
+                        .unwrap();
+
+                    writeln!(readme, "A new line!").unwrap();
+                }
+
+                ReleaseWorkspace::try_new(root.clone())
+                    .unwrap()
+                    .git_add_all_and_commit("some chnages", None)
+                    .unwrap();
+            }) as F,
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        println!("---\ntest case {}\n---", i);
+
+        pre_release_fn((
+            workspace_mocker.root(),
+            expected_versions
+                .clone()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            expected_crates
+                .clone()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        ));
+
+        let topmost_release_title_pre = {
+            let workspace = ReleaseWorkspace::try_new(workspace_mocker.root()).unwrap();
+            let topmost_release_title_pre = match workspace
+                .changelog()
+                .unwrap()
+                .topmost_release()
+                .unwrap()
+                .unwrap()
+            {
+                crate::changelog::ReleaseChange::WorkspaceReleaseChange(title, _) => title,
+                _ => "not found".to_string(),
+            };
+
+            workspace.git_checkout_branch("develop", true).unwrap();
+
+            let mut cmd = assert_cmd::Command::cargo_bin("release-automation").unwrap();
+            let cmd = cmd.args(&[
+                &format!("--workspace-path={}", workspace.root().display()),
+                "--log-level=trace",
+                "release",
+                "--disallowed-version-reqs=>=0.1",
+                "--allowed-matched-blockers=UnreleasableViaChangelogFrontmatter,DisallowedVersionReqViolated",
+                "--steps=CreateReleaseBranch,BumpReleaseVersions,BumpPostReleaseVersions",
+            ]);
+            let output = assert_cmd_success!(cmd);
+            println!("stderr:\n'{}'\n---\nstdout:\n'{}'\n---", output.0, output.1,);
+
+            topmost_release_title_pre
+        };
+
+        let topmost_release_title = {
+            // todo: figure out how we can make the workspace re-read its data instead of creating a new one
+            let workspace = ReleaseWorkspace::try_new(workspace_mocker.root()).unwrap();
+
+            assert_eq!(
+                expected_versions,
+                &get_crate_versions(expected_crates, &workspace),
+            );
+
+            let topmost_release_title = match workspace
+                .changelog()
+                .unwrap()
+                .topmost_release()
+                .unwrap()
+                .unwrap()
+            {
+                crate::changelog::ReleaseChange::WorkspaceReleaseChange(title, _) => title,
+                _ => "not found".to_string(),
+            };
+
+            {
+                // ensure the git commit matches the most recent release.
+
+                let commit_msg = {
+                    let commit = workspace
+                        .git_repo()
+                        .head()
+                        .unwrap()
+                        .peel_to_commit()
+                        .unwrap();
+
+                    commit.message().unwrap().to_string()
+                };
+
+                let expected_start = format!(
+                    "setting develop versions to conclude 'release-{}'",
+                    topmost_release_title
+                );
+
+                assert!(
+                    commit_msg.starts_with(&expected_start),
+                    "unexpected commit msg. got: \n'{}'\nexpected it to start with: \n'{}'",
+                    commit_msg,
+                    expected_start,
+                );
+            }
+
+            topmost_release_title
+        };
+
+        if *expect_new_release {
+            assert_ne!(
+                topmost_release_title, topmost_release_title_pre,
+                "expected new release? {}",
+                *expect_new_release
+            );
+        } else {
+            assert_eq!(
+                topmost_release_title, topmost_release_title_pre,
+                "expected new release? {}",
+                *expect_new_release
+            )
+        }
+
+        // sleep so the time based branch name is unique
+        // todo: change to other branch name generator?
+        std::thread::sleep(std::time::Duration::new(1, 0));
+    }
 }

@@ -227,7 +227,7 @@ pub(crate) struct ReleaseWorkspace<'a> {
 #[educe(Default)]
 pub(crate) struct SelectionCriteria {
     #[educe(Default(expression = r#"fancy_regex::Regex::new(".*").expect("matching anything is valid")"#r))]
-    pub(crate) selection_filter: fancy_regex::Regex,
+    pub(crate) match_filter: fancy_regex::Regex,
     pub(crate) enforced_version_reqs: Vec<semver::VersionReq>,
     pub(crate) disallowed_version_reqs: Vec<semver::VersionReq>,
     pub(crate) allowed_dev_dependency_blockers: BitFlags<CrateStateFlags>,
@@ -251,7 +251,7 @@ pub(crate) enum CrateStateFlags {
     /// Has no previous release
     NoPreviousRelease,
     /// Has a previous release but its tag is missing
-    MissingTagRelease,
+    MissingReleaseTag,
     /// has changed since previous release
     ChangedSincePreviousRelease,
 
@@ -350,7 +350,7 @@ impl CrateState {
             self.meta_flags.remove(MetaCrateStateFlags::Blocked);
         }
 
-        if self.disallowed_blockers().is_empty() {
+        if self.allowed() {
             self.meta_flags.insert(MetaCrateStateFlags::Allowed);
         } else {
             self.meta_flags.remove(MetaCrateStateFlags::Allowed);
@@ -372,7 +372,7 @@ impl CrateState {
 
         match (self.is_matched(), self.is_dev_dependency()) {
             (true, _) => blocking_flags.remove(self.allowed_selection_blockers),
-            (false, true) => blocking_flags.remove(self.allowed_dev_dependency_blockers),
+            (_, true) => blocking_flags.remove(self.allowed_dev_dependency_blockers),
             _ => {}
         }
 
@@ -390,7 +390,7 @@ impl CrateState {
     /// There are changes to be released.
     pub(crate) fn changed(&self) -> bool {
         self.flags.contains(CrateStateFlags::NoPreviousRelease)
-            || self.flags.contains(CrateStateFlags::MissingTagRelease)
+            || self.flags.contains(CrateStateFlags::MissingReleaseTag)
             || self
                 .flags
                 .contains(CrateStateFlags::ChangedSincePreviousRelease)
@@ -403,7 +403,7 @@ impl CrateState {
 
     /// Will be included in the release
     pub(crate) fn release_selection(&self) -> bool {
-        !self.blocked() && self.selected()
+        !self.blocked() && self.changed() && self.selected()
     }
 
     /// Returns a formatted string with an overview of crates and their states.
@@ -424,13 +424,13 @@ impl CrateState {
         }
         .to_string();
         if show_blocking {
-            states_shown += "Blocking "
+            states_shown += "* Disallowed Blocking "
         }
         if show_flags {
-            states_shown += "Flags "
+            states_shown += "* Flags "
         }
         if show_meta {
-            states_shown += "Meta"
+            states_shown += "* Meta"
         }
         if !states_shown.is_empty() {
             states_shown += "\n";
@@ -443,7 +443,7 @@ impl CrateState {
                 msg += &format!(
                     "{blocking_flags:?}\n{empty:<30}",
                     empty = "",
-                    blocking_flags = state.blocked_by().iter().collect::<Vec<_>>(),
+                    blocking_flags = state.disallowed_blockers().iter().collect::<Vec<_>>(),
                 );
             }
 
@@ -532,6 +532,26 @@ impl<'a> ReleaseWorkspace<'a> {
                 ..Default::default()
             };
 
+            let previous_release_tags: HashMap<_,_> = if let Some(changelog) = self.changelog() {
+                changelog.changes()?.into_iter().filter_map(|change| match change {
+                    ChangeT::Release(changelog::ReleaseChange::WorkspaceReleaseChange(title, crates)) => Some((title, crates)),
+                    _ => None,
+                }).fold(Default::default(), |mut acc, (title, crates)|{
+                    for crt in crates {
+                        acc.insert(
+                            crt,
+                            // todo: derive this prefix from a const or function
+                            "release-".to_owned()+&changelog::normalize_heading_name(&title)
+                        );
+                    }
+                    acc
+                })
+            } else {
+                Default::default()
+            };
+
+            trace!("[{:?}] previous releases {:#?}", self.root(), previous_release_tags);
+
 
             for member in self.members()? {
                 // helper macros to access the desired state
@@ -550,7 +570,7 @@ impl<'a> ReleaseWorkspace<'a> {
                 }
 
                 // regex matching state
-                if criteria.selection_filter.is_match(&member.name())? {
+                if criteria.match_filter.is_match(&member.name())? {
                     insert_state!(CrateStateFlags::Matched);
                 }
 
@@ -593,26 +613,6 @@ impl<'a> ReleaseWorkspace<'a> {
                         insert_state!(CrateStateFlags::MissingReadme);
                     }
 
-                    // dependency state
-                    // only dependencies of explicitly matched packages are considered here.
-                    //
-                    // note(steveej):
-                    // while trying to signal the inclusion of reverse dependencies it eventually occurred to me
-                    // that only considering the crates in the dependency trees that start with a selected package is preferred.
-                    // even if a reverse dependency of a matched package is changed during the release (by having its dependency version updated),
-                    // its not relevant to the release if it hasn't been requested for release excplicitly or as a dependency of one that has been, in which case it is already considered.
-                    if get_state!(member.name()).is_matched() {
-                        for dep in member.dependencies_in_workspace()? {
-                            insert_state!(
-                                match dep.kind() {
-                                    CargoDepKind::Development => CrateStateFlags::IsWorkspaceDevDependency,
-                                    _ => CrateStateFlags::IsWorkspaceDependency,
-                                },
-                                dep.package_name().to_string()
-                            );
-                        }
-                    }
-
                     // change related state
                     match member.changelog() {
                         None => {
@@ -632,43 +632,45 @@ impl<'a> ReleaseWorkspace<'a> {
                                 }
                             }
 
-                            if let Some(previous_release) = changelog
-                                .changes()
-                                .ok()
-                                .iter()
-                                .flatten()
-                                .filter_map(|r| {
-                                    if let ChangeT::Release(r) = r {
-                                        Some(r)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .take(1)
-                                .next()
+                            if let Some(changelog::ReleaseChange::CrateReleaseChange(previous_release)) =
+                                changelog
+                                    .changes()
+                                    .ok()
+                                    .iter()
+                                    .flatten()
+                                    .filter_map(|r| {
+                                        if let ChangeT::Release(r) = r {
+                                            Some(r)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .take(1)
+                                    .next()
                             {
 
-
-
+                                // todo: derive the tagname from a function
                                 // lookup the git tag for the previous release
-                                if let Some(git_tag) = &git_lookup_tag(&self.git_repo,
+                                let maybe_git_tag =
+                                    previous_release_tags
+                                        .get(&format!("{}-{}", &member.name(), previous_release))
+                                        .map(|tag| { git_lookup_tag(&self.git_repo, &tag) })
+                                        .flatten();
 
-                                    // todo: derive the tagname from a function
-                                    &format!(
-                                        "{}-{}",
-                                        member.name(),
-                                        previous_release.title()
-                                    )) {
+                                log::trace!("[{}] previous git tag {:?}", member.name(), maybe_git_tag);
+
+                                if let Some(git_tag) = maybe_git_tag {
+
                                     insert_state!(CrateStateFlags::HasPreviousRelease);
 
                                     // todo: make comparison ref configurable
-                                    if !changed_files(member.package.root(), git_tag, "HEAD")?
+                                    if !changed_files(member.package.root(), &git_tag, "HEAD")?
                                         .is_empty()
                                     {
                                         insert_state!(CrateStateFlags::ChangedSincePreviousRelease)
                                     }
                                 } else {
-                                    insert_state!(CrateStateFlags::MissingTagRelease);
+                                    insert_state!(CrateStateFlags::MissingReleaseTag);
                                 }
                             } else {
                                     insert_state!(CrateStateFlags::NoPreviousRelease);
@@ -676,7 +678,29 @@ impl<'a> ReleaseWorkspace<'a> {
                         }
                     }
 
-
+                    // dependency state
+                    // only dependencies of explicitly matched packages are considered here.
+                    //
+                    // note(steveej):
+                    // while trying to signal the inclusion of reverse dependencies it eventually occurred to me
+                    // that only considering the crates in the dependency trees that start with a selected package is preferred.
+                    // even if a reverse dependency of a matched package is changed during the release (by having its dependency version updated),
+                    // its not relevant to the release if it hasn't been requested for release excplicitly or as a dependency of one that has been, in which case it is already considered.
+                    // if get_state!(member.name()).is_matched() && !get_state!(member.name()).blocked()
+                    if get_state!(member.name()).is_matched()
+                        && get_state!(member.name()).changed()
+                        && !get_state!(member.name()).blocked()
+                    {
+                        for dep in member.dependencies_in_workspace()? {
+                            insert_state!(
+                                match dep.kind() {
+                                    CargoDepKind::Development => CrateStateFlags::IsWorkspaceDevDependency,
+                                    _ => CrateStateFlags::IsWorkspaceDependency,
+                                },
+                                dep.package_name().to_string()
+                            );
+                        }
+                    }
                 }
             }
 
@@ -842,11 +866,11 @@ impl<'a> ReleaseWorkspace<'a> {
         })?
     }
 
-    /// Creates a new git branch with the given name off of the current HEAD.
-    pub(crate) fn git_checkout_new_branch(&'a self, name: &str) -> Fallible<git2::Branch> {
+    /// Creates a git branch with the given name off of the current HEAD, optionally overwriting the branch if it exists.
+    pub(crate) fn git_checkout_branch(&'a self, name: &str, force: bool) -> Fallible<git2::Branch> {
         let head_commit = self.git_repo.head()?.peel_to_commit()?;
 
-        let new_branch = self.git_repo.branch(name, &head_commit, false)?;
+        let new_branch = self.git_repo.branch(name, &head_commit, force)?;
 
         let (object, reference) = self.git_repo.revparse_ext(name)?;
 
@@ -863,6 +887,11 @@ impl<'a> ReleaseWorkspace<'a> {
         self.git_repo.set_head(&reference_name)?;
 
         Ok(new_branch)
+    }
+
+    /// Creates a new git branch with the given name off of the current HEAD.
+    pub(crate) fn git_checkout_new_branch(&'a self, name: &str) -> Fallible<git2::Branch> {
+        self.git_checkout_branch(name, false)
     }
 
     // todo: make this configurable?
@@ -919,7 +948,7 @@ impl<'a> ReleaseWorkspace<'a> {
                 &format!("tag for release {}", name),
                 force,
             )
-            .map_err(anyhow::Error::from)
+            .context(format!("creating tag '{}'", name))
     }
 
     pub(crate) fn changelog(&'a self) -> Option<&'a ChangelogT<'a, WorkspaceChangelog>> {

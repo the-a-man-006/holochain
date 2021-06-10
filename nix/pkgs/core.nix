@@ -31,13 +31,13 @@ rec {
           --workspace-path=$PWD \
           --log-level=${logLevel} \
         check \
-          --selection-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$" \
           --disallowed-version-reqs=">=0.1" \
-          --allowed-selection-blockers=UnreleasableViaChangelogFrontmatter \
-          --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter \
-          --exclude-optional-deps
-
+          --allowed-matched-blockers=UnreleasableViaChangelogFrontmatter \
+          --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter,MissingReadme \
+          --match-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$"
     '';
+        # todo: verify why this was needed and isn't any longer
+        #  --exclude-optional-deps
     in writeShellScriptBin "hc-release-automation-test" ''
     set -euxo pipefail
 
@@ -62,11 +62,12 @@ rec {
         --log-level=trace \
       release \
         ''${@} \
-        --selection-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$" \
         --disallowed-version-reqs=">=0.1" \
-        --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter \
-        --exclude-optional-deps
+        --allowed-dev-dependency-blockers=UnreleasableViaChangelogFrontmatter,MissingReadme \
+        --match-filter="^(holochain|holochain_cli|kitsune_p2p_proxy)$" \
   '';
+      # todo: verify why this was needed and isn't any longer
+      #  --exclude-optional-deps
 
   hcStaticChecks = let
       pathPrefix = lib.makeBinPath
@@ -208,6 +209,10 @@ rec {
     compare=develop
     bench $compare
     add_comment_to_commit $compare $commit
+  '';
+
+  hcRegenReadmes = writeShellScriptBin "hc-regen-readmes" ''
+    cargo-readme readme --project-root=crates/release-automation/ --output=README.md;
   '';
 } // (if stdenv.isLinux then {
   hcCoverageTest = writeShellScriptBin "hc-coverage-test" ''

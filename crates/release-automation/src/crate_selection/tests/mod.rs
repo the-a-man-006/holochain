@@ -79,7 +79,7 @@ fn detect_changed_crates() {
 #[test]
 fn release_selection() {
     let criteria = SelectionCriteria {
-        selection_filter: fancy_regex::Regex::new("crate_(b|a|e)").unwrap(),
+        match_filter: fancy_regex::Regex::new("crate_(b|a|e)").unwrap(),
         disallowed_version_reqs: vec![semver::VersionReq::from_str(">=0.1.0").unwrap()],
         allowed_dev_dependency_blockers: make_bitflags!(CrateStateFlags::{MissingReadme}),
         allowed_selection_blockers: make_bitflags!(CrateStateFlags::{MissingReadme}),

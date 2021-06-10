@@ -28,7 +28,7 @@ pub(crate) use crate_selection::{ReleaseWorkspace, SelectionCriteria};
 #[repr(u64)]
 #[derive(enum_utils::FromStr, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ReleaseSteps {
-    /// branch off of main and merge develop into it
+    /// create a new release branch based on develop
     CreateReleaseBranch,
     /// substeps: get crate selection, bump cargo toml versions, rotate
     /// changelog, aggregate changelog, commit changes, tag
@@ -65,6 +65,16 @@ pub(crate) fn cmd<'a>(
             cmd_args.check_args.to_selection_criteria(),
         )?;
 
+        macro_rules! _skip_on_empty_selection {
+            ($step:expr, $body:expr) => {
+                if ws.release_selection()?.len() == 0 {
+                    warn!("empty release selection. skipping {:?}", $step);
+                } else {
+                    $body
+                }
+            };
+        }
+
         match step {
             ReleaseSteps::CreateReleaseBranch => create_release_branch(&ws, &cmd_args)?,
             ReleaseSteps::BumpReleaseVersions => bump_release_versions(&ws, &cmd_args)?,
@@ -82,7 +92,10 @@ pub(crate) fn cmd<'a>(
             }
             ReleaseSteps::PublishToCratesIo => publish_to_crates_io(&ws, &cmd_args)?,
             ReleaseSteps::PushReleaseTag => {
-                // todo: push all the tags that originated in this workspace release to the upstream
+                // todo: push all the tags that originated in this workspace release to the upstream:
+                // - workspace release tag
+                // - every crate release tag
+                // - every crate post-release tag
             }
             ReleaseSteps::BumpPostReleaseVersions => post_release_bump_versions(&ws, &cmd_args)?,
 
@@ -217,6 +230,11 @@ fn bump_release_versions<'a>(
     // check the workspace and determine the release selection
     let selection = crate::common::selection_check(&cmd_args.check_args, &ws)?;
 
+    if selection.is_empty() {
+        debug!("no crates to release, exiting.");
+        return Ok(());
+    }
+
     let mut changed_crate_changelogs = vec![];
 
     for crt in &selection {
@@ -267,8 +285,6 @@ fn bump_release_versions<'a>(
         }
 
         let crate_release_heading_name = format!("{}", release_version);
-        // todo: remove or use
-        let _crate_tag_name = format!("{}-v{}", crt.name(), crate_release_heading_name);
 
         if maybe_previous_release_version.is_none() || greater_release {
             // create a new release entry in the crate's changelog and move all items from the unreleased heading if there are any
@@ -300,8 +316,6 @@ fn bump_release_versions<'a>(
                 changelog,
             });
         }
-
-        // todo(spike): create a commit (and tag) for the crate release here?
     }
 
     // ## for the workspace release:
@@ -355,20 +369,17 @@ fn bump_release_versions<'a>(
         ws.git_add_all_and_commit(&commit_msg, None)?;
     };
 
-    let git_tags = [workspace_tag_name]
+    // create a tag for each crate which will be used to identify its latest release
+    let git_tags = changed_crate_changelogs
         .iter()
-        .map(String::from)
-        .chain(
-            changed_crate_changelogs
-                .iter()
-                .map(WorkspaceCrateReleaseHeading::title),
-        )
+        .map(WorkspaceCrateReleaseHeading::title)
         .collect::<Vec<_>>();
 
     if cmd_args.dry_run {
         info!("[dry-run] would create the following tags: {:?}", git_tags);
     } else {
         for git_tag in &git_tags {
+            debug!("[{}] creating tag '{}'", workspace_tag_name, git_tag);
             ws.git_tag(git_tag, false)?;
         }
     };
@@ -461,7 +472,7 @@ fn post_release_bump_versions<'a>(
         Err(e) => bail!(e),
     };
 
-    let crate_release_titles: HashSet<String> = match ws
+    let (release_title, crate_release_titles) = match ws
         .changelog()
         .map(|cl| cl.topmost_release())
         .transpose()?
@@ -470,11 +481,20 @@ fn post_release_bump_versions<'a>(
             "no topmost release found in changelog '{:?}'. nothing to publish",
             ws.changelog()
         ))? {
-        changelog::ReleaseChange::WorkspaceReleaseChange(_, releases) => {
-            HashSet::from_iter(releases.into_iter())
+        changelog::ReleaseChange::WorkspaceReleaseChange(title, releases) => {
+            (title, HashSet::<String>::from_iter(releases.into_iter()))
         }
         unexpected => bail!("unexpected topmost release: {:?}", unexpected),
     };
+
+    if !branch_name.contains(&release_title) {
+        // todo: create error type for this instead
+        warn!(
+            "branch name '{}' doesn't contain topmost release title '{}'. skipping..",
+            branch_name, release_title
+        );
+        return Ok(());
+    }
 
     let released_crates = ws
         .members()?
@@ -513,12 +533,14 @@ fn post_release_bump_versions<'a>(
                     "[{}] rewriting version {} -> {}",
                     crt.name(),
                     crt.version(),
-                    version
+                    version,
                 );
 
-                set_version(cmd_args, crt, version.clone())?;
+                if !cmd_args.dry_run {
+                    set_version(cmd_args, crt, version.clone())?;
+                };
 
-                // todo: create a commit for reach crate?
+                // todo: create a commit and a tag for each crate?
 
                 Ok(msg + &format!("\n- {}-{}", crt.name(), version))
             })?;
@@ -534,13 +556,17 @@ fn post_release_bump_versions<'a>(
         commit_details,
     );
 
-    if cmd_args.dry_run {
-        info!(
-            "[dry-run] would create the following commit: {}",
-            commit_msg
-        );
-    } else {
+    let git_tag = &branch_name;
+    info!(
+        "{}creating the following commit: \n'{}'\nat the tag {}",
+        if cmd_args.dry_run { "[dry-run] " } else { "" },
+        branch_name,
+        git_tag,
+    );
+
+    if !cmd_args.dry_run {
         ws.git_add_all_and_commit(&commit_msg, None)?;
+        ws.git_tag(&git_tag, false)?;
     };
 
     Ok(())

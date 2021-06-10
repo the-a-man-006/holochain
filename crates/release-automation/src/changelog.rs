@@ -28,12 +28,9 @@ impl Frontmatter {
     }
 }
 
-fn normalize_heading_name(input: &str) -> String {
-    input
-        .replace("[", "")
-        .replace("]", "")
-        .replace(" ", "")
-        .to_lowercase()
+/// Trims potential brackets and spaces
+pub(crate) fn normalize_heading_name(input: &str) -> String {
+    input.replace("[", "").replace("]", "").replace(" ", "")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,11 +74,7 @@ impl<'a> ChangeT {
                         let title = get_heading_text(sibling)
                             .ok_or(anyhow::anyhow!("no heading text found"))?;
 
-                        let trimmed = title
-                            .replace("[", "")
-                            .replace("]", "")
-                            .replace(" ", "")
-                            .to_lowercase();
+                        let trimmed = normalize_heading_name(&title).to_lowercase();
 
                         match trimmed.as_str() {
                             "unreleased" => {
@@ -764,7 +757,7 @@ impl<'a> ChangelogT<'a, WorkspaceChangelog> {
 
             let release_crate_names = crate_release_headings
                 .iter()
-                .map(|wcrh| normalize_heading_name(&wcrh.prefix))
+                .map(|wcrh| normalize_heading_name(&wcrh.prefix).to_lowercase())
                 .collect::<HashSet<_>>();
             trace!(
                 "will remove headings that match '{:?}'",
@@ -1175,7 +1168,7 @@ mod tests {
         let workspace = ReleaseWorkspace::try_new_with_criteria(
             workspace_mocker.root(),
             crate::release::SelectionCriteria {
-                selection_filter: fancy_regex::Regex::new("^crate_(c|e)$").unwrap(),
+                match_filter: fancy_regex::Regex::new("^crate_(c|e)$").unwrap(),
                 allowed_dev_dependency_blockers: make_bitflags!(CrateStateFlags::{MissingReadme}),
                 allowed_selection_blockers: make_bitflags!(CrateStateFlags::{MissingReadme}),
 
