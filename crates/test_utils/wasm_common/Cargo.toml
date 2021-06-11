@@ -10,5 +10,5 @@ crate-type = [ "cdylib", "rlib" ]
 path = "src/lib.rs"
 
 [dependencies]
-hdk = { path = "../../hdk" }
+hdk = { path = "../../hdk" ,version = "0.0.101"}
 serde = "1.0"
