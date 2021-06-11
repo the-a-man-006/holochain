@@ -54,6 +54,13 @@ rec {
     )
   '';
 
+  hcReleaseAutmoation = writeShellScriptBin "hc-release-automation" ''
+    set -euxo pipefail
+
+    cargo run --manifest-path=crates/release-automation/Cargo.toml -- \
+      ''${@}
+  '';
+
   hcReleaseAutmoationRelease = writeShellScriptBin "hc-release-automation-release" ''
     set -euxo pipefail
 
@@ -94,6 +101,19 @@ rec {
     hc-static-checks
     hc-test
   '';
+
+  hcReleaseTest = writeShellScriptBin "hc-release-test" ''
+    set -euxo pipefail
+    export RUST_BACKTRACE=1
+
+    # limit parallel jobs to reduce memory consumption
+    export NUM_JOBS=8
+    export CARGO_BUILD_JOBS=8
+
+    hc-merge-test
+    cargo build --no-default-features --locked --frozen
+  '';
+
 
   hcSpeedTest = writeShellScriptBin "hc-speed-test" ''
     cargo test speed_test_prep --test speed_tests --release --manifest-path=crates/holochain/Cargo.toml --features "build_wasms" -- --ignored
