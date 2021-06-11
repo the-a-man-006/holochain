@@ -314,12 +314,12 @@ impl CrateState {
         new
     }
 
-    pub(crate) fn merge(&mut self, other: Self) -> () {
+    pub(crate) fn merge(&mut self, other: Self) {
         self.flags.extend(other.flags.iter());
         self.update_meta_flags();
     }
 
-    pub(crate) fn insert(&mut self, flag: CrateStateFlags) -> () {
+    pub(crate) fn insert(&mut self, flag: CrateStateFlags) {
         self.flags.insert(flag);
         self.update_meta_flags();
     }
@@ -337,7 +337,7 @@ impl CrateState {
             .contains(CrateStateFlags::IsWorkspaceDevDependency)
     }
 
-    fn update_meta_flags(&mut self) -> () {
+    fn update_meta_flags(&mut self) {
         if self.changed() {
             self.meta_flags.insert(MetaCrateStateFlags::Changed);
         } else {
