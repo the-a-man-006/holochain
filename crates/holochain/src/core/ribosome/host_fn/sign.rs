@@ -10,10 +10,10 @@ pub fn sign(
     call_context: Arc<CallContext>,
     input: Sign,
 ) -> Result<Signature, WasmError> {
-    Ok(tokio_helper::block_forever_on(async move {
+    tokio_helper::block_forever_on(async move {
         call_context.host_access.keystore().sign(input).await
     })
-    .map_err(|keystore_error| WasmError::Host(keystore_error.to_string()))?)
+    .map_err(|keystore_error| WasmError::Host(keystore_error.to_string()))
 }
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ pub mod wasm_test {
         crate::test_utils::fake_genesis(env.clone())
             .await
             .unwrap();
-        let workspace = HostFnWorkspace::new(env.clone(), test_cache.env(), author).unwrap();
+        let workspace = HostFnWorkspace::new(env.clone(), test_cache.env(), author).await.unwrap();
 
         let mut host_access = fixt!(ZomeCallHostAccess, Predictable);
         host_access.workspace = workspace;

@@ -69,6 +69,7 @@ where
         GenesisSelfCheckHostAccess,
         GenesisSelfCheckInvocation {
             payload: GenesisSelfCheckData {
+                dna_def: dna_file.dna_def().clone(),
                 membrane_proof: membrane_proof.clone(),
                 agent_key: agent_pubkey.clone(),
             },
@@ -116,7 +117,7 @@ impl GenesisWorkspace {
         let count = self.vault.conn()?.with_reader(|txn| {
             let count: u32 = txn.query_row(
                 "
-                SELECT 
+                SELECT
                 COUNT(Header.hash)
                 FROM Header
                 JOIN DhtOp ON DhtOp.header_hash = Header.hash
@@ -124,6 +125,7 @@ impl GenesisWorkspace {
                 DhtOp.is_authored = 1
                 AND
                 Header.author = :author
+                LIMIT 3
                 ",
                 named_params! {
                     ":author": author,
@@ -176,9 +178,12 @@ pub mod tests {
         }
 
         {
-            let source_chain = SourceChain::new(vault.clone().into(), author.clone()).unwrap();
+            let source_chain = SourceChain::new(vault.clone().into(), author.clone())
+                .await
+                .unwrap();
             let headers = source_chain
-                .query(&Default::default())
+                .query(Default::default())
+                .await
                 .unwrap()
                 .into_iter()
                 .map(|e| e.header().clone())
@@ -186,7 +191,11 @@ pub mod tests {
 
             assert_matches!(
                 headers.as_slice(),
-                [Header::Dna(_), Header::AgentValidationPkg(_), Header::Create(_)]
+                [
+                    Header::Dna(_),
+                    Header::AgentValidationPkg(_),
+                    Header::Create(_)
+                ]
             );
         }
     }

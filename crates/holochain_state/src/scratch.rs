@@ -65,6 +65,10 @@ impl Scratch {
         SyncScratch(Arc::new(Mutex::new(self)))
     }
 
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.headers.is_empty()
     }
@@ -73,7 +77,7 @@ impl Scratch {
         self.headers.iter()
     }
 
-    pub fn elements<'iter>(&'iter self) -> impl Iterator<Item = Element> + 'iter {
+    pub fn elements(&self) -> impl Iterator<Item = Element> + '_ {
         self.headers.iter().cloned().map(move |shh| {
             let entry = shh
                 .header()
@@ -121,14 +125,12 @@ impl Scratch {
     }
 
     /// Drain out all the headers.
-    pub fn drain_headers<'iter>(
-        &'iter mut self,
-    ) -> impl Iterator<Item = SignedHeaderHashed> + 'iter {
+    pub fn drain_headers(&mut self) -> impl Iterator<Item = SignedHeaderHashed> + '_ {
         self.headers.drain(..)
     }
 
     /// Drain out all the entries.
-    pub fn drain_entries<'iter>(&'iter mut self) -> impl Iterator<Item = EntryHashed> + 'iter {
+    pub fn drain_entries(&mut self) -> impl Iterator<Item = EntryHashed> + '_ {
         self.entries.drain().map(|(hash, entry)| {
             EntryHashed::with_pre_hashed(
                 Arc::try_unwrap(entry).unwrap_or_else(|e| (*e).clone()),
