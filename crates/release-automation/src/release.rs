@@ -482,7 +482,9 @@ fn publish_paths_to_crates_io(
                 acc += &format!("\n{:?}: \n{}", path.to_path_buf(), details);
             }
 
-            // todo: for each newly published crate add `github:holochain:core-dev` and `zippy` as an owner on crates.io
+            if !dry_run {
+                // todo: for each newly published crate add `github:holochain:core-dev` and `zippy` as an owner on crates.io
+            }
 
             Ok(acc)
         })?;

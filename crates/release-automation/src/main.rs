@@ -43,6 +43,9 @@ Each release involves three branches:
 There was an attempt to use a modified version of [cargo-release](https://github.com/sunng87/cargo-release) but the opionions on the desired workflow currently suggest to build it out from scratch.
 It would be nice to eventually consolidate both into a common project with enough flexibility to cover the union of the supported use-cases.
 
+* https://github.com/apollographql/federation/issues/602
+* https://github.com/pksunkara/cargo-workspaces
+
 ## Development
 
 With the `nix-shell` you can run the test suite using:
