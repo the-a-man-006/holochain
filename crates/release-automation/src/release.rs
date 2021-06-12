@@ -4,6 +4,7 @@ use super::*;
 
 use anyhow::bail;
 use anyhow::Context;
+use bstr::ByteSlice;
 use cli::ReleaseArgs;
 use comrak::{format_commonmark, parse_document, Arena, ComrakOptions};
 use enumflags2::{bitflags, BitFlags};
@@ -180,32 +181,26 @@ fn set_version<'a>(
     release_version: semver::Version,
 ) -> Fallible<()> {
     let cargo_toml_path = crt.root().join("Cargo.toml");
-    if cmd_args.dry_run {
-        info!(
-            "[dry-run] would set version to {} in manifest at {:?}",
-            release_version, cargo_toml_path
-        );
-    } else {
+    debug!(
+        "setting version to {} in manifest at {:?}",
+        release_version, cargo_toml_path
+    );
+    if !cmd_args.dry_run {
         cargo_next::set_version(&cargo_toml_path, release_version.to_string())?;
     }
 
     for dependant in crt.dependants_in_workspace()? {
         let target_manifest = dependant.root().join("Cargo.toml");
 
-        if cmd_args.dry_run {
-            info!(
-                "[dry-run] would update dependency on {} to version {} in manifest at {:?}",
-                &crt.name(),
-                release_version.to_string().as_str(),
-                &target_manifest,
-            );
-        } else {
-            trace!(
-                "[{}] updating dependency version from dependant {}",
-                crt.name(),
-                dependant.name()
-            );
+        debug!(
+            "[{}] updating dependency version from dependant {} to version {} in manifest {:?}",
+            crt.name(),
+            dependant.name(),
+            release_version.to_string().as_str(),
+            &target_manifest,
+        );
 
+        if !cmd_args.dry_run {
             set_dependency_version(
                 &target_manifest,
                 &crt.name(),
@@ -293,18 +288,14 @@ fn bump_release_versions<'a>(
                 .changelog()
                 .ok_or(anyhow::anyhow!("{} doesn't have changelog", crt.name()))?;
 
-            if cmd_args.dry_run {
-                info!(
-                    "[dry-run] would add release {} to changelog at {:?}",
-                    crate_release_heading_name,
-                    changelog.path()
-                );
-            } else {
-                trace!(
-                    "[{}] creating crate release heading '{}'",
-                    crt.name(),
-                    crate_release_heading_name
-                );
+            debug!(
+                "[{}] creating crate release heading '{}' in '{:?}'",
+                crt.name(),
+                crate_release_heading_name,
+                changelog.path(),
+            );
+
+            if !cmd_args.dry_run {
                 changelog
                     .add_release(crate_release_heading_name.clone())
                     .context(format!("adding release to changelog for '{}'", crt.name()))?;
@@ -334,16 +325,30 @@ fn bump_release_versions<'a>(
         .changelog()
         .ok_or(anyhow::anyhow!("workspace has no changelog"))?;
 
-    if cmd_args.dry_run {
-        info!(
-            "[dry-run] would add release {} to changelog at {:?} with the following crate releases: {}",
-            workspace_release_name,
-            ws_changelog.path(),
-            changed_crate_changelogs.iter().map(|cr| format!("\n- {}",cr.title())).collect::<String>()
-        );
-    } else {
+    info!(
+        "adding release {} to changelog at {:?} with the following crate releases: {}",
+        workspace_release_name,
+        ws_changelog.path(),
+        changed_crate_changelogs
+            .iter()
+            .map(|cr| format!("\n- {}", cr.title()))
+            .collect::<String>()
+    );
+
+    if !cmd_args.dry_run {
         ws_changelog.add_release(workspace_release_name, &changed_crate_changelogs)?;
     }
+
+    info!("running `cargo publish --dry-run ..` for all selected crates...");
+    publish_paths_to_crates_io(
+        &selection
+            .iter()
+            .map(|crt| crt.manifest_path().to_path_buf())
+            .collect::<Vec<_>>(),
+        true,
+        false,
+    )
+    .context("running 'cargo publish' in dry-run mode for all selected crates")?;
 
     // create a release commit with an overview of which crates are included
     let commit_msg = indoc::formatdoc!(
@@ -360,24 +365,18 @@ fn bump_release_versions<'a>(
             .collect::<String>()
     );
 
-    if cmd_args.dry_run {
-        info!(
-            "[dry-run] would create the following commit: {}",
-            commit_msg
-        );
-    } else {
+    info!("creating the following commit: {}", commit_msg);
+    if !cmd_args.dry_run {
         ws.git_add_all_and_commit(&commit_msg, None)?;
     };
-
-    // create a tag for each crate which will be used to identify its latest release
     let git_tags = changed_crate_changelogs
         .iter()
         .map(WorkspaceCrateReleaseHeading::title)
         .collect::<Vec<_>>();
 
-    if cmd_args.dry_run {
-        info!("[dry-run] would create the following tags: {:?}", git_tags);
-    } else {
+    // create a tag for each crate which will be used to identify its latest release
+    info!("creating the following tags: {:?}", git_tags);
+    if !cmd_args.dry_run {
         for git_tag in &git_tags {
             debug!("[{}] creating tag '{}'", workspace_tag_name, git_tag);
             ws.git_tag(git_tag, false)?;
@@ -428,34 +427,68 @@ fn publish_to_crates_io<'a>(
             })?;
     info!("selected manifest paths: {:?}", &manifest_paths);
 
-    // try to publish the crates to crates.io
-    for path in manifest_paths {
-        let mut cmd = std::process::Command::new("cargo");
+    publish_paths_to_crates_io(&manifest_paths, cmd_args.dry_run, false)?;
 
-        cmd.args(
-            [
-                vec!["publish"],
-                if cmd_args.dry_run {
-                    vec!["--dry-run"]
-                } else {
-                    vec![]
-                },
-                vec![
-                    "--no-default-features",
-                    "--verbose",
-                    "--locked",
-                    &format!("--manifest-path={}", path.to_string_lossy()),
-                ],
-            ]
-            .concat(),
-        );
+    Ok(())
+}
 
-        debug!("Running command: {:?}", cmd);
+// try to publish the given manifests to crates.io
+fn publish_paths_to_crates_io(
+    manifest_paths: &[PathBuf],
+    dry_run: bool,
+    allow_dirty: bool,
+) -> Fallible<()> {
+    let errors = manifest_paths
+        .iter()
+        .try_fold(String::new(), |mut acc, path| -> Fallible<_> {
+            let mut cmd = std::process::Command::new("cargo");
 
-        cmd.status().context("process exitted unsuccessfully")?;
+            cmd.args(
+                [
+                    vec!["publish"],
+                    if dry_run {
+                        vec!["--dry-run", "--no-verify"]
+                    } else {
+                        vec![]
+                    },
+                    if allow_dirty {
+                        vec!["--allow-dirty"]
+                    } else {
+                        vec![]
+                    },
+                    vec![
+                        "--no-default-features",
+                        "--verbose",
+                        "--locked",
+                        &format!("--manifest-path={}", path.to_string_lossy()),
+                    ],
+                ]
+                .concat(),
+            );
 
-        // todo: for each newly published crate add `github:holochain:core-dev` and `zippy` as an owner on crates.io
-        // todo: create a new tag for every published crate?
+            debug!("Running command: {:?}", cmd);
+
+            let output = cmd.output().context("process exitted unsuccessfully")?;
+            if !output.status.success() {
+                let mut details = String::new();
+                for line in output.stderr.lines_with_terminator() {
+                    let line = line.to_str_lossy();
+                    if line.contains("error:") {
+                        details = String::new();
+                    }
+
+                    details += &line;
+                }
+                acc += &format!("\n{:?}: \n{}", path.to_path_buf(), details);
+            }
+
+            // todo: for each newly published crate add `github:holochain:core-dev` and `zippy` as an owner on crates.io
+
+            Ok(acc)
+        })?;
+
+    if !errors.is_empty() {
+        bail!("cargo publish failed for the following paths:\n{}", errors);
     }
 
     Ok(())

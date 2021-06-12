@@ -130,6 +130,10 @@ impl WorkspaceMocker {
                                 name = "{}"
                                 version = "{}"
                                 authors = []
+                                description = "Holochain, a framework for distributed applications"
+                                license = "Apache-2.0"
+                                homepage = "https://github.com/holochain/holochain"
+                                documentation = "https://github.com/holochain/holochain"
 
                                 [dependencies]
                                 {}

@@ -336,6 +336,8 @@ fn changelog_aggregation() {
     );
 }
 
+// todo: set up a custom registry and actually publish the crates
+#[ignore]
 #[test]
 fn release_publish() {
     let workspace_mocker = example_workspace_1().unwrap();
