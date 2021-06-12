@@ -114,11 +114,7 @@ pub async fn put_agent_info_signed(
     environ: EnvWrite,
     agent_info_signed: kitsune_p2p::agent_store::AgentInfoSigned,
 ) -> ConductorResult<()> {
-<<<<<<< HEAD
-    Ok(environ.conn()?.p2p_put(&agent_info_signed)?)
-=======
     Ok(p2p_put(&environ, &agent_info_signed).await?)
->>>>>>> sqlite-blocking
 }
 
 fn now() -> u64 {
