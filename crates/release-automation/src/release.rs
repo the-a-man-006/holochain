@@ -444,7 +444,6 @@ fn publish_to_crates_io<'a>(
                     "--no-default-features",
                     "--verbose",
                     "--locked",
-                    "--frozen",
                     &format!("--manifest-path={}", path.to_string_lossy()),
                 ],
             ]
@@ -453,7 +452,7 @@ fn publish_to_crates_io<'a>(
 
         debug!("Running command: {:?}", cmd);
 
-        cmd.output().context("failed to execute process")?;
+        cmd.status().context("process exitted unsuccessfully")?;
 
         // todo: for each newly published crate add `github:holochain:core-dev` and `zippy` as an owner on crates.io
         // todo: create a new tag for every published crate?
